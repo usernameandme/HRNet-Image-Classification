@@ -20,6 +20,9 @@ import torch.nn as nn
 import torch._utils
 import torch.nn.functional as F
 
+from typing import List
+
+
 BN_MOMENTUM = 0.1
 logger = logging.getLogger(__name__)
 
@@ -225,29 +228,35 @@ class HighResolutionModule(nn.Module):
     def get_num_inchannels(self):
         return self.num_inchannels
 
-    def forward(self, x):
+    def forward(self, x: List[torch.Tensor]):
         if self.num_branches == 1:
             return [self.branches[0](x[0])]
 
-        for i in range(self.num_branches):
-            x[i] = self.branches[i](x[i])
+        # for i in range(self.num_branches):
+        #     x[i] = self.branches[i](x[i])
+        for i, branch in enumerate(self.branches):
+            x[i] = branch(x[i])
 
         x_fuse = []
-        for i in range(len(self.fuse_layers)):
-            y = x[0] if i == 0 else self.fuse_layers[i][0](x[0])
-            for j in range(1, self.num_branches):
-                if i == j:
-                    y = y + x[j]
+        for i,fuse_layer in enumerate(self.fuse_layers):
+            y = x[0] if i == 0 else fuse_layer[0](x[0])
+            #for j in range(1, self.num_branches):
+            for j, fuse_sub_layer in enumerate(fuse_layer):
+                if j == 0 or j > self.num_branches:
+                    pass
                 else:
-                    y = y + self.fuse_layers[i][j](x[j])
+                    if i == j:
+                        y = y + x[j]
+                    else:
+                        y = y + fuse_sub_layer(x[j])
             x_fuse.append(self.relu(y))
 
         return x_fuse
 
 
 blocks_dict = {
-    'BASIC': BasicBlock,
-    'BOTTLENECK': Bottleneck
+    0 : BasicBlock,
+    1 : Bottleneck
 }
 
 
@@ -266,14 +275,15 @@ class HighResolutionNet(nn.Module):
 
         self.stage1_cfg = cfg['MODEL']['EXTRA']['STAGE1']
         num_channels = self.stage1_cfg['NUM_CHANNELS'][0]
-        block = blocks_dict[self.stage1_cfg['BLOCK']]
+        block = blocks_dict[self.stage1_cfg['BLOCK'][0]]
         num_blocks = self.stage1_cfg['NUM_BLOCKS'][0]
         self.layer1 = self._make_layer(block, 64, num_channels, num_blocks)
         stage1_out_channel = block.expansion*num_channels
 
         self.stage2_cfg = cfg['MODEL']['EXTRA']['STAGE2']
         num_channels = self.stage2_cfg['NUM_CHANNELS']
-        block = blocks_dict[self.stage2_cfg['BLOCK']]
+        print(num_channels)
+        block = blocks_dict[self.stage2_cfg['BLOCK'][0]]
         num_channels = [
             num_channels[i] * block.expansion for i in range(len(num_channels))]
         self.transition1 = self._make_transition_layer(
@@ -283,7 +293,7 @@ class HighResolutionNet(nn.Module):
 
         self.stage3_cfg = cfg['MODEL']['EXTRA']['STAGE3']
         num_channels = self.stage3_cfg['NUM_CHANNELS']
-        block = blocks_dict[self.stage3_cfg['BLOCK']]
+        block = blocks_dict[self.stage3_cfg['BLOCK'][0]]
         num_channels = [
             num_channels[i] * block.expansion for i in range(len(num_channels))]
         self.transition2 = self._make_transition_layer(
@@ -293,7 +303,7 @@ class HighResolutionNet(nn.Module):
 
         self.stage4_cfg = cfg['MODEL']['EXTRA']['STAGE4']
         num_channels = self.stage4_cfg['NUM_CHANNELS']
-        block = blocks_dict[self.stage4_cfg['BLOCK']]
+        block = blocks_dict[self.stage4_cfg['BLOCK'][0]]
         num_channels = [
             num_channels[i] * block.expansion for i in range(len(num_channels))]
         self.transition3 = self._make_transition_layer(
@@ -411,11 +421,11 @@ class HighResolutionNet(nn.Module):
 
     def _make_stage(self, layer_config, num_inchannels,
                     multi_scale_output=True):
-        num_modules = layer_config['NUM_MODULES']
-        num_branches = layer_config['NUM_BRANCHES']
+        num_modules = layer_config['NUM_MODULES'][0]
+        num_branches = layer_config['NUM_BRANCHES'][0]
         num_blocks = layer_config['NUM_BLOCKS']
         num_channels = layer_config['NUM_CHANNELS']
-        block = blocks_dict[layer_config['BLOCK']]
+        block = blocks_dict[layer_config['BLOCK'][0]]
         fuse_method = layer_config['FUSE_METHOD']
 
         modules = []
@@ -437,7 +447,8 @@ class HighResolutionNet(nn.Module):
             )
             num_inchannels = modules[-1].get_num_inchannels()
 
-        return nn.Sequential(*modules), num_inchannels
+        #return nn.Sequential(*modules), num_inchannels
+        return nn.ModuleList(modules), num_inchannels
 
     def forward(self, x):
         x = self.conv1(x)
@@ -449,34 +460,69 @@ class HighResolutionNet(nn.Module):
         x = self.layer1(x)
 
         x_list = []
-        for i in range(self.stage2_cfg['NUM_BRANCHES']):
-            if self.transition1[i] is not None:
-                x_list.append(self.transition1[i](x))
+
+        for aux in self.transition1:
+            if aux is not None:
+                x_list.append(aux(x))
             else:
                 x_list.append(x)
-        y_list = self.stage2(x_list)
+
+        # for i in range(self.stage2_cfg['NUM_BRANCHES'][0]):
+        #     if self.transition1[i] is not None:
+        #         x_list.append(self.transition1[i](x))
+        #     else:
+        #         x_list.append(x)
+        for aux in self.stage2:
+            x_list = aux(x_list)
+        #y_list = self.stage2(x_list)
+        y_list = x_list
 
         x_list = []
-        for i in range(self.stage3_cfg['NUM_BRANCHES']):
-            if self.transition2[i] is not None:
-                x_list.append(self.transition2[i](y_list[-1]))
+        for i, aux in enumerate(self.transition2):
+            if aux is not None:
+                x_list.append(aux(y_list[-1]))
             else:
                 x_list.append(y_list[i])
-        y_list = self.stage3(x_list)
+
+        # for i in range(self.stage3_cfg['NUM_BRANCHES'][0]):
+        #     if self.transition2[i] is not None:
+        #         x_list.append(self.transition2[i](y_list[-1]))
+        #     else:
+        #         x_list.append(y_list[i])
+        
+        for aux in self.stage3:
+            x_list = aux(x_list)
+        y_list = x_list
+        #y_list = self.stage3(x_list)
 
         x_list = []
-        for i in range(self.stage4_cfg['NUM_BRANCHES']):
-            if self.transition3[i] is not None:
-                x_list.append(self.transition3[i](y_list[-1]))
+
+        for i, aux in enumerate(self.transition3):
+            if aux is not None:
+                x_list.append(aux(y_list[-1]))
             else:
                 x_list.append(y_list[i])
-        y_list = self.stage4(x_list)
+
+        # for i in range(self.stage4_cfg['NUM_BRANCHES'][0]):
+        #     if self.transition3[i] is not None:
+        #         x_list.append(self.transition3[i](y_list[-1]))
+        #     else:
+        #         x_list.append(y_list[i])
+
+        for aux in self.stage4:
+            x_list = aux(x_list)
+        y_list = x_list
+        #y_list = self.stage4(x_list)
 
         # Classification Head
         y = self.incre_modules[0](y_list[0])
-        for i in range(len(self.downsamp_modules)):
-            y = self.incre_modules[i+1](y_list[i+1]) + \
-                        self.downsamp_modules[i](y)
+        for i, (incre_module, downsamp_module) in \
+             enumerate(zip(self.incre_modules[1:], self.downsamp_modules)):
+            y = incre_module.forward(y_list[i+1]) + downsamp_module(y)
+
+        # for i in range(len(self.downsamp_modules)):
+        #     y = self.incre_modules[i+1](y_list[i+1]) + \
+        #                 self.downsamp_modules[i](y)
 
         y = self.final_layer(y)
 
